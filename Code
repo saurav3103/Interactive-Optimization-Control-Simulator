@@ -1,0 +1,218 @@
+# ======================================================
+# OPTIMIZATION THEORY SIMULATOR (QUADRATIC + POLYNOMIAL)
+# ======================================================
+
+import numpy as np
+import matplotlib.pyplot as plt
+from numpy.linalg import eig, norm
+import ipywidgets as widgets
+from IPython.display import display, clear_output, HTML
+
+plt.style.use("seaborn-v0_8")
+
+# ======================================================
+# OBJECTIVES
+# ======================================================
+
+def quad_cost(x, Q):
+    return float(x.T @ Q @ x)
+
+def quad_grad(x, Q):
+    return 2 * Q @ x
+
+def poly_cost(x, p):
+    x1, x2 = x
+    return (
+        p["x1_4"] * x1**4 +
+        p["x2_4"] * x2**4 +
+        p["coupling"] * x1**2 * x2**2 +
+        p["x1_2"] * x1**2 +
+        p["x2_2"] * x2**2
+    )
+
+def poly_grad(x, p):
+    x1, x2 = x
+    return np.array([
+        4*p["x1_4"]*x1**3 + 2*p["coupling"]*x1*x2**2 + 2*p["x1_2"]*x1,
+        4*p["x2_4"]*x2**3 + 2*p["coupling"]*x2*x1**2 + 2*p["x2_2"]*x2
+    ])
+
+# ======================================================
+# CONTROLLER
+# ======================================================
+
+def control_law(grad, controller):
+    if controller == "Gradient Descent":
+        return -grad
+    else:
+        return -np.tanh(grad)
+
+# ======================================================
+# SIMULATION
+# ======================================================
+
+def simulate(x0, Q, poly_params, objective, controller, system, step, steps=250):
+    n = len(x0)
+    traj = np.zeros((steps, n))
+    energy = np.zeros(steps)
+    traj[0] = x0
+
+    for k in range(steps - 1):
+        x = traj[k]
+
+        if objective == "Quadratic":
+            grad = quad_grad(x, Q)
+            V = quad_cost(x, Q)
+        else:
+            grad = poly_grad(x, poly_params)
+            V = poly_cost(x, poly_params)
+
+        u = control_law(grad, controller)
+
+        x_next = x + (step * u if system == "Continuous" else 0.8 * u)
+
+        if not np.all(np.isfinite(x_next)) or norm(x_next) > 1e7:
+            return traj[:k+1], energy[:k+1], "Simulation unstable (overflow/divergence)."
+
+        traj[k+1] = x_next
+        energy[k] = V
+
+    energy[-1] = energy[-2]
+    return traj, energy, None
+
+# ======================================================
+# MAIN
+# ======================================================
+
+def run_simulator(
+    objective,
+    n_states,
+    eig_min,
+    eig_max,
+    rotation,
+    stiffness,
+    x1_4, x2_4, coupling, x1_2, x2_2,
+    controller,
+    system,
+    step,
+    view_i,
+    view_j
+):
+    clear_output(wait=True)
+
+    display(HTML("<h2 style='color:#2E86C1'>Optimization Theory Simulator</h2>"))
+
+    # ---------------------------
+    # Polynomial restriction
+    # ---------------------------
+    if objective == "Polynomial" and n_states != 2:
+        display(HTML(
+            "<b style='color:red'>Polynomial objectives are visualized only for 2 states.</b>"
+        ))
+        return
+
+    # ---------------------------
+    # Build Q
+    # ---------------------------
+    eigs = np.linspace(eig_min, eig_max, n_states)
+    U, _ = np.linalg.qr(np.random.randn(n_states, n_states))
+    Q = stiffness * U @ np.diag(eigs) @ U.T
+
+    # Rotation (first 2 dims only)
+    theta = np.deg2rad(rotation)
+    R2 = np.array([[np.cos(theta), -np.sin(theta)],
+                   [np.sin(theta),  np.cos(theta)]])
+    if n_states >= 2:
+        R = np.eye(n_states)
+        R[:2, :2] = R2
+        Q = R @ Q @ R.T
+
+    # Initial state
+    x0 = np.random.randn(n_states)
+    x0 /= norm(x0)
+
+    poly_params = dict(
+        x1_4=x1_4, x2_4=x2_4,
+        coupling=coupling,
+        x1_2=x1_2, x2_2=x2_2
+    )
+
+    traj, energy, err = simulate(
+        x0, Q, poly_params, objective, controller, system, step
+    )
+
+    if err:
+        display(HTML(f"<b style='color:red'>⚠ {err}</b>"))
+
+    # ---------------------------
+    # Visualization checks
+    # ---------------------------
+    if view_i == view_j or view_i >= n_states or view_j >= n_states:
+        display(HTML("<b style='color:red'>Invalid visualization indices.</b>"))
+        return
+
+    fig, ax = plt.subplots(1, 3, figsize=(18, 5))
+
+    # Trajectory
+    ax[0].plot(traj[:, view_i], traj[:, view_j], linewidth=2)
+    ax[0].set_title("State Trajectory (Projection)")
+    ax[0].grid(True)
+
+    # Energy
+    ax[1].plot(energy, linewidth=2)
+    ax[1].set_title("Energy / Cost")
+    ax[1].set_xlabel("Iteration")
+
+    # Modes
+    if objective == "Quadratic":
+        try:
+            eigvals, eigvecs = eig(Q)
+            modes = (np.linalg.inv(eigvecs) @ traj.T).T
+            ax[2].plot(modes[:, 0], label="Mode 1")
+            ax[2].plot(modes[:, 1], label="Mode 2")
+            ax[2].legend()
+            ax[2].set_title("Modal Coordinates")
+        except Exception:
+            ax[2].text(0.2, 0.5, "Modal analysis failed",
+                       transform=ax[2].transAxes)
+    else:
+        ax[2].text(0.15, 0.5, "Modal analysis not defined\nfor polynomial objective",
+                   transform=ax[2].transAxes)
+
+    plt.tight_layout()
+    plt.show()
+
+    print("===== SYSTEM DIAGNOSTICS =====")
+    print("Objective:", objective)
+    print("States:", n_states)
+    print("Controller:", controller)
+    print("System:", system)
+
+# ======================================================
+# UI
+# ======================================================
+
+ui = widgets.interactive(
+    run_simulator,
+
+    objective=widgets.ToggleButtons(options=["Quadratic", "Polynomial"]),
+    n_states=widgets.IntSlider(value=2, min=2, max=20),
+    eig_min=widgets.FloatText(value=0.5),
+    eig_max=widgets.FloatText(value=3.0),
+    rotation=widgets.IntSlider(value=30, min=0, max=90),
+    stiffness=widgets.FloatSlider(value=1.0, min=0.1, max=10),
+
+    x1_4=widgets.FloatText(value=0.2, description="x₁⁴"),
+    x2_4=widgets.FloatText(value=0.2, description="x₂⁴"),
+    coupling=widgets.FloatText(value=0.5, description="x₁²x₂²"),
+    x1_2=widgets.FloatText(value=1.0, description="x₁²"),
+    x2_2=widgets.FloatText(value=1.0, description="x₂²"),
+
+    controller=widgets.ToggleButtons(options=["Gradient Descent", "Sliding Mode Control"]),
+    system=widgets.ToggleButtons(options=["Continuous", "Discrete"]),
+    step=widgets.FloatSlider(value=0.02, min=0.001, max=0.1),
+    view_i=widgets.IntText(value=0),
+    view_j=widgets.IntText(value=1)
+)
+
+display(ui)
